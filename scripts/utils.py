@@ -5,7 +5,7 @@ from datetime import datetime
 from lxml import html
 from dateutil import parser
 
-MEDLINE = 'ftp://ftp.nlm.nih.gov/nlmdata/.medleasebaseline/gz/'
+MEDLINE = 'ftp://ftp.ncbi.nlm.nih.gov/pubmed/baseline/'
 PUBMED_OA = 'ftp://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/'
 
 def get_update_date(option='medline'):
