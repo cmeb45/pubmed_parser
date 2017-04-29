@@ -9,10 +9,10 @@ from pyspark import SparkConf, SparkContext
 from pyspark.sql.functions import rank, max, sum, desc
 from utils import get_update_date
 
-# directory
-home_dir = os.path.expanduser('~')
-download_dir = os.path.join(home_dir, 'Downloads', 'medline_download')
-save_dir = os.path.join(home_dir, 'Downloads','medline_save')
+# Connect to S3 bucket
+s3 = S3Connection('AWSAccessKeyId', 'AWSSecretKey', host='s3.amazonaws.com')
+b = s3.get_bucket('bucket-name')
+k = Key(b)
 
 def update():
     """Download and update file"""
@@ -38,20 +38,44 @@ def update():
         subprocess.call(['wget', 'ftp://ftp.ncbi.nlm.nih.gov/pubmed/baseline/*.xml.gz', '--directory', download_dir])
     return is_update, date_update
 
+def parse_results_map(key):
+    """Parse MEDLINE XML file"""
+    # Extract name of file from key
+    key_name = key.name.encode('utf-8')
+    data_file = os.path.basename(key_name)
+    # Download file from S3 bucket
+    key.get_contents_to_filename(data_file)
+    # Parse file
+    temp = [Row(file_name=os.path.basename(data_file),**publication_dict) 
+            for publication_dict in pp.parse_medline_xml(data_file)]
+    # Delete file from local directory
+    subprocess.call(['rm', '-rf', data_file])
+    return temp
+
+def parse_grant_map(key):
+    """Parse Grant ID from MEDLINE XML file"""
+    # Extract name of file from key
+    key_name = key.name.encode('utf-8')
+    data_file = os.path.basename(key_name)
+    # Download file from S3 bucket
+    key.get_contents_to_filename(data_file)
+    # Parse file
+    temp = pp.parse_medline_grant_id(data_file)
+    # Delete file from local directory
+    subprocess.call(['rm', '-rf', data_file])
+    return temp
+
 def process_file(date_update):
     """Process downloaded MEDLINE folder to csv file"""
     print("Process MEDLINE file to csv")
-    # remove if folder still exist
-    if glob(os.path.join(save_dir, 'medline_*.csv')):
-        subprocess.call(['rm', '-rf', 'medline_*.csv'])
 
     date_update_str = date_update.strftime("%Y_%m_%d")
-    path_rdd = sc.parallelize(glob(os.path.join(download_dir, 'medline*.xml.gz')), numSlices=1000)
-    parse_results_rdd = path_rdd.\
-        flatMap(lambda x: [Row(file_name=os.path.basename(x), **publication_dict)
-                           for publication_dict in pp.parse_medline_xml(x)])
+    keys = b.list()
+    total_cores = int(sc._conf.get('spark.executor.instances')) * int(sc._conf.get('spark.executor.cores'))
+    path_rdd = sc.parallelize(keys, numSlices=3*total_cores)
+    parse_results_rdd = path_rdd.flatMap(parse_results_map)
     medline_df = parse_results_rdd.toDF()
-    medline_df.write.csv(os.path.join(save_dir, 'medline_raw_%s.csv' % date_update_str),
+    medline_df.write.csv('medline_raw_%s.csv' % date_update_str,
                              mode='overwrite')
 
     window = Window.partitionBy(['pmid']).orderBy(desc('file_name'))
@@ -61,15 +85,15 @@ def process_file(date_update):
         '*')
     windowed_df.\
         where('is_deleted = False and pos = 1').\
-        write.csv(os.path.join(save_dir, 'medline_lastview_%s.csv' % date_update_str),
+        write.csv('medline_lastview_%s.csv' % date_update_str,
                       mode='overwrite')
 
     # parse grant database
-    parse_grant_rdd = path_rdd.flatMap(lambda x: pp.parse_medline_grant_id(x))\
+    parse_grant_rdd = path_rdd.flatMap(parse_grant_map)\
         .filter(lambda x: x is not None)\
         .map(lambda x: Row(**x))
     grant_df = parse_grant_rdd.toDF()
-    grant_df.write.csv(os.path.join(save_dir, 'medline_grant_%s.csv' % date_update_str),
+    grant_df.write.csv('medline_grant_%s.csv' % date_update_str,
                            mode='overwrite')
 
 conf = SparkConf().setAppName('medline_spark')\
